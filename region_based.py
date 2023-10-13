@@ -1,15 +1,14 @@
+from PIL import Image
+import numpy as np
+import argparse
+import torchvision.transforms as T
+import torch.nn as nn
+import torch
 from transformers import CLIPTextModel, CLIPTokenizer, logging
 from diffusers import AutoencoderKL, UNet2DConditionModel, DDIMScheduler
 
 # suppress partial model loading warning
 logging.set_verbosity_error()
-
-import torch
-import torch.nn as nn
-import torchvision.transforms as T
-import argparse
-import numpy as np
-from PIL import Image
 
 
 def seed_everything(seed):
@@ -53,23 +52,30 @@ class MultiDiffusion(nn.Module):
         elif self.sd_version == '1.5':
             model_key = "runwayml/stable-diffusion-v1-5"
         else:
-            model_key = self.sd_version #For custom models or fine-tunes, allow people to use arbitrary versions
-            #raise ValueError(f'Stable-diffusion version {self.sd_version} not supported.')
+            # For custom models or fine-tunes, allow people to use arbitrary versions
+            model_key = self.sd_version
+            # raise ValueError(f'Stable-diffusion version {self.sd_version} not supported.')
 
         # Create model
-        self.vae = AutoencoderKL.from_pretrained(model_key, subfolder="vae").to(self.device)
-        self.tokenizer = CLIPTokenizer.from_pretrained(model_key, subfolder="tokenizer")
-        self.text_encoder = CLIPTextModel.from_pretrained(model_key, subfolder="text_encoder").to(self.device)
-        self.unet = UNet2DConditionModel.from_pretrained(model_key, subfolder="unet").to(self.device)
+        self.vae = AutoencoderKL.from_pretrained(
+            model_key, subfolder="vae").to(self.device)
+        self.tokenizer = CLIPTokenizer.from_pretrained(
+            model_key, subfolder="tokenizer")
+        self.text_encoder = CLIPTextModel.from_pretrained(
+            model_key, subfolder="text_encoder").to(self.device)
+        self.unet = UNet2DConditionModel.from_pretrained(
+            model_key, subfolder="unet").to(self.device)
 
-        self.scheduler = DDIMScheduler.from_pretrained(model_key, subfolder="scheduler")
+        self.scheduler = DDIMScheduler.from_pretrained(
+            model_key, subfolder="scheduler")
 
         print(f'[INFO] loaded stable diffusion!')
 
     @torch.no_grad()
     def get_random_background(self, n_samples):
         # sample random background with a constant rgb value
-        backgrounds = torch.rand(n_samples, 3, device=self.device)[:, :, None, None].repeat(1, 1, 512, 512)
+        backgrounds = torch.rand(n_samples, 3, device=self.device)[
+            :, :, None, None].repeat(1, 1, 512, 512)
         return torch.cat([self.encode_imgs(bg.unsqueeze(0)) for bg in backgrounds])
 
     @torch.no_grad()
@@ -77,13 +83,15 @@ class MultiDiffusion(nn.Module):
         # Tokenize text and get embeddings
         text_input = self.tokenizer(prompt, padding='max_length', max_length=self.tokenizer.model_max_length,
                                     truncation=True, return_tensors='pt')
-        text_embeddings = self.text_encoder(text_input.input_ids.to(self.device))[0]
+        text_embeddings = self.text_encoder(
+            text_input.input_ids.to(self.device))[0]
 
         # Do the same for unconditional embeddings
         uncond_input = self.tokenizer(negative_prompt, padding='max_length', max_length=self.tokenizer.model_max_length,
                                       return_tensors='pt')
 
-        uncond_embeddings = self.text_encoder(uncond_input.input_ids.to(self.device))[0]
+        uncond_embeddings = self.text_encoder(
+            uncond_input.input_ids.to(self.device))[0]
 
         # Cat for final embeddings
         text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
@@ -105,17 +113,19 @@ class MultiDiffusion(nn.Module):
 
     @torch.no_grad()
     def generate(self, masks, prompts, negative_prompts='', height=512, width=2048, num_inference_steps=50,
-                      guidance_scale=7.5, bootstrapping=20):
+                 guidance_scale=7.5, bootstrapping=20):
 
         # get bootstrapping backgrounds
         # can move this outside of the function to speed up generation. i.e., calculate in init
         bootstrapping_backgrounds = self.get_random_background(bootstrapping)
 
         # Prompts -> text embeds
-        text_embeds = self.get_text_embeds(prompts, negative_prompts)  # [2 * len(prompts), 77, 768]
+        text_embeds = self.get_text_embeds(
+            prompts, negative_prompts)  # [2 * len(prompts), 77, 768]
 
         # Define panorama grid and get views
-        latent = torch.randn((1, self.unet.in_channels, height // 8, width // 8), device=self.device)
+        latent = torch.randn(
+            (1, self.unet.in_channels, height // 8, width // 8), device=self.device)
         noise = latent.clone().repeat(len(prompts) - 1, 1, 1, 1)
         views = get_views(height, width)
         count = torch.zeros_like(latent)
@@ -130,28 +140,36 @@ class MultiDiffusion(nn.Module):
 
                 for h_start, h_end, w_start, w_end in views:
                     masks_view = masks[:, :, h_start:h_end, w_start:w_end]
-                    latent_view = latent[:, :, h_start:h_end, w_start:w_end].repeat(len(prompts), 1, 1, 1)
+                    latent_view = latent[:, :, h_start:h_end, w_start:w_end].repeat(
+                        len(prompts), 1, 1, 1)
                     if i < bootstrapping:
-                        bg = bootstrapping_backgrounds[torch.randint(0, bootstrapping, (len(prompts) - 1,))]
-                        bg = self.scheduler.add_noise(bg, noise[:, :, h_start:h_end, w_start:w_end], t)
-                        latent_view[1:] = latent_view[1:] * masks_view[1:] + bg * (1 - masks_view[1:])
+                        bg = bootstrapping_backgrounds[torch.randint(
+                            0, bootstrapping, (len(prompts) - 1,))]
+                        bg = self.scheduler.add_noise(
+                            bg, noise[:, :, h_start:h_end, w_start:w_end], t)
+                        latent_view[1:] = latent_view[1:] * \
+                            masks_view[1:] + bg * (1 - masks_view[1:])
 
                     # expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
                     latent_model_input = torch.cat([latent_view] * 2)
 
                     # predict the noise residual
-                    noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeds)['sample']
+                    noise_pred = self.unet(
+                        latent_model_input, t, encoder_hidden_states=text_embeds)['sample']
 
                     # perform guidance
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                    noise_pred = noise_pred_uncond + guidance_scale * \
+                        (noise_pred_text - noise_pred_uncond)
 
                     # compute the denoising step with the reference model
-                    latents_view_denoised = self.scheduler.step(noise_pred, t, latent_view)['prev_sample']
+                    latents_view_denoised = self.scheduler.step(
+                        noise_pred, t, latent_view)['prev_sample']
 
                     value[:, :, h_start:h_end, w_start:w_end] += (latents_view_denoised * masks_view).sum(dim=0,
                                                                                                           keepdims=True)
-                    count[:, :, h_start:h_end, w_start:w_end] += masks_view.sum(dim=0, keepdims=True)
+                    count[:, :, h_start:h_end,
+                          w_start:w_end] += masks_view.sum(dim=0, keepdims=True)
 
                 # take the MultiDiffusion step
                 latent = torch.where(count > 0, value / count, value)
@@ -178,9 +196,11 @@ if __name__ == '__main__':
     parser.add_argument('--mask_paths', type=list)
     # important: it is necessary that SD output high-quality images for the bg/fg prompts.
     parser.add_argument('--bg_prompt', type=str)
-    parser.add_argument('--bg_negative', type=str)  # 'artifacts, blurry, smooth texture, bad quality, distortions, unrealistic, distorted image'
+    # 'artifacts, blurry, smooth texture, bad quality, distortions, unrealistic, distorted image'
+    parser.add_argument('--bg_negative', type=str)
     parser.add_argument('--fg_prompts', type=list)
-    parser.add_argument('--fg_negative', type=list)  # 'artifacts, blurry, smooth texture, bad quality, distortions, unrealistic, distorted image'
+    # 'artifacts, blurry, smooth texture, bad quality, distortions, unrealistic, distorted image'
+    parser.add_argument('--fg_negative', type=list)
     parser.add_argument('--sd_version', type=str, default='2.0', choices=['1.5', '2.0'],
                         help="stable diffusion version")
     parser.add_argument('--H', type=int, default=768)
@@ -197,7 +217,8 @@ if __name__ == '__main__':
 
     sd = MultiDiffusion(device, opt.sd_version)
 
-    fg_masks = torch.cat([preprocess_mask(mask_path, opt.H // 8, opt.W // 8, device) for mask_path in opt.mask_paths])
+    fg_masks = torch.cat([preprocess_mask(
+        mask_path, opt.H // 8, opt.W // 8, device) for mask_path in opt.mask_paths])
     bg_mask = 1 - torch.sum(fg_masks, dim=0, keepdim=True)
     bg_mask[bg_mask < 0] = 0
     masks = torch.cat([bg_mask, fg_masks])
@@ -205,7 +226,8 @@ if __name__ == '__main__':
     prompts = [opt.bg_prompt] + opt.fg_prompts
     neg_prompts = [opt.bg_negative] + opt.fg_negative
 
-    img = sd.generate(masks, prompts, neg_prompts, opt.H, opt.W, opt.steps, bootstrapping=opt.bootstrapping)
+    img = sd.generate(masks, prompts, neg_prompts, opt.H, opt.W,
+                      opt.steps, bootstrapping=opt.bootstrapping)
 
     # save image
     img.save('out.png')
