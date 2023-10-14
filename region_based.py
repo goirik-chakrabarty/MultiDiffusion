@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch
 from transformers import CLIPTextModel, CLIPTokenizer, logging
 from diffusers import AutoencoderKL, UNet2DConditionModel, DDIMScheduler
+from edit.cross_attention import prep_unet
 
 # suppress partial model loading warning
 logging.set_verbosity_error()
@@ -51,6 +52,8 @@ class MultiDiffusion(nn.Module):
             model_key = "stabilityai/stable-diffusion-2-base"
         elif self.sd_version == '1.5':
             model_key = "runwayml/stable-diffusion-v1-5"
+        elif self.sd_version == '1.4':
+            model_key = "CompVis/stable-diffusion-v1-4"
         else:
             # For custom models or fine-tunes, allow people to use arbitrary versions
             model_key = self.sd_version
@@ -65,9 +68,10 @@ class MultiDiffusion(nn.Module):
             model_key, subfolder="text_encoder").to(self.device)
         self.unet = UNet2DConditionModel.from_pretrained(
             model_key, subfolder="unet").to(self.device)
-
         self.scheduler = DDIMScheduler.from_pretrained(
             model_key, subfolder="scheduler")
+
+        # self.unet = prep_unet(self.unet)
 
         print(f'[INFO] loaded stable diffusion!')
 
@@ -126,6 +130,7 @@ class MultiDiffusion(nn.Module):
         # Define panorama grid and get views
         latent = torch.randn(
             (1, self.unet.in_channels, height // 8, width // 8), device=self.device)
+        # latent = torch.load('/home/prathosh/goirik/MultiDiffusion/assets/misc/1.pt').cuda().unsqueeze(0)
         noise = latent.clone().repeat(len(prompts) - 1, 1, 1, 1)
         views = get_views(height, width)
         count = torch.zeros_like(latent)
@@ -154,6 +159,7 @@ class MultiDiffusion(nn.Module):
                     latent_model_input = torch.cat([latent_view] * 2)
 
                     # predict the noise residual
+                    # print(help(self.unet))
                     noise_pred = self.unet(
                         latent_model_input, t, encoder_hidden_states=text_embeds)['sample']
 
@@ -193,15 +199,15 @@ def preprocess_mask(mask_path, h, w, device):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mask_paths', type=list)
+    parser.add_argument('--mask_paths', type=str)
     # important: it is necessary that SD output high-quality images for the bg/fg prompts.
     parser.add_argument('--bg_prompt', type=str)
     # 'artifacts, blurry, smooth texture, bad quality, distortions, unrealistic, distorted image'
     parser.add_argument('--bg_negative', type=str)
-    parser.add_argument('--fg_prompts', type=list)
+    parser.add_argument('--fg_prompts', type=str)
     # 'artifacts, blurry, smooth texture, bad quality, distortions, unrealistic, distorted image'
-    parser.add_argument('--fg_negative', type=list)
-    parser.add_argument('--sd_version', type=str, default='2.0', choices=['1.5', '2.0'],
+    parser.add_argument('--fg_negative', type=str)
+    parser.add_argument('--sd_version', type=str, default='1.4', choices=['1.5', '2.0'],
                         help="stable diffusion version")
     parser.add_argument('--H', type=int, default=768)
     parser.add_argument('--W', type=int, default=512)
@@ -216,6 +222,11 @@ if __name__ == '__main__':
     device = torch.device('cuda')
 
     sd = MultiDiffusion(device, opt.sd_version)
+    
+    opt.mask_paths = opt.mask_paths.split(', ')
+    opt.fg_prompts = opt.fg_prompts.split(', ')
+    opt.bg_negative = opt.bg_negative.split(', ')
+    opt.fg_negative = opt.fg_negative.split(', ')
 
     fg_masks = torch.cat([preprocess_mask(
         mask_path, opt.H // 8, opt.W // 8, device) for mask_path in opt.mask_paths])
@@ -224,10 +235,10 @@ if __name__ == '__main__':
     masks = torch.cat([bg_mask, fg_masks])
 
     prompts = [opt.bg_prompt] + opt.fg_prompts
-    neg_prompts = [opt.bg_negative] + opt.fg_negative
+    neg_prompts = opt.bg_negative + opt.fg_negative
 
     img = sd.generate(masks, prompts, neg_prompts, opt.H, opt.W,
                       opt.steps, bootstrapping=opt.bootstrapping)
 
     # save image
-    img.save('out.png')
+    img.save('assets/output/out.png')
